@@ -1880,17 +1880,24 @@ class NetworkMonitorGUI:
         
         def update_display():
             timestamp = datetime.now().strftime('%H:%M:%S')
-            packet_line = f"[{timestamp}] {packet_info}\n"
+            # Clean packet info to avoid encoding issues
+            clean_packet_info = packet_info.replace('📦', '[PKT]').replace('🔥', '[HOT]').replace('⚠️', '[WARN]')
+            packet_line = f"[{timestamp}] {clean_packet_info}\n"
             
             # Update main session display
             if session['packet_text']:
-                session['packet_text'].insert(tk.END, packet_line)
-                session['packet_text'].see(tk.END)
-                
-                # Keep only last 50 lines
-                lines = session['packet_text'].get(1.0, tk.END).split('\n')
-                if len(lines) > 50:
-                    session['packet_text'].delete(1.0, f"{len(lines)-50}.0")
+                try:
+                    session['packet_text'].insert(tk.END, packet_line)
+                    session['packet_text'].see(tk.END)
+                    
+                    # Keep only last 200 lines for better history
+                    content = session['packet_text'].get(1.0, tk.END)
+                    lines = content.split('\n')
+                    if len(lines) > 200:
+                        # Remove oldest lines
+                        session['packet_text'].delete(1.0, f"{len(lines)-200}.0")
+                except tk.TclError:
+                    pass  # Widget might be destroyed
             
             # Update split screen displays if they exist
             if self.split_view_active:
@@ -1902,17 +1909,18 @@ class NetworkMonitorGUI:
                             split_widget.insert(tk.END, packet_line)
                             split_widget.see(tk.END)
                             
-                            # Keep only last 50 lines in split display too
-                            lines = split_widget.get(1.0, tk.END).split('\n')
-                            if len(lines) > 50:
-                                split_widget.delete(1.0, f"{len(lines)-50}.0")
+                            # Keep only last 200 lines in split display too
+                            content = split_widget.get(1.0, tk.END)
+                            lines = content.split('\n')
+                            if len(lines) > 200:
+                                split_widget.delete(1.0, f"{len(lines)-200}.0")
                         except (tk.TclError, KeyError):
                             # Widget might be destroyed, clean up reference
                             if split_widget_key in session:
                                 del session[split_widget_key]
         
-        # Schedule update with delay to prevent focus stealing
-        self.root.after(500, update_display)
+        # Schedule update immediately for better responsiveness
+        self.root.after(0, update_display)
     
     def update_session_displays(self, session_id):
         """Update displays for a specific session"""
@@ -2365,18 +2373,46 @@ class NetworkMonitorGUI:
             self.log_to_console(f"❌ Error processing packet: {e}")
             
     def display_packet(self, packet_info):
-        """Display packet in GUI"""
-        def update_gui():
-            self.packet_text.insert(tk.END, f"{datetime.now().strftime('%H:%M:%S')} {packet_info}\n")
-            self.packet_text.see(tk.END)
-            # Keep only last 100 lines
-            lines = self.packet_text.get(1.0, tk.END).split('\n')
-            if len(lines) > 100:
-                self.packet_text.delete(1.0, f"{len(lines)-100}.0")
-                
-        # Schedule GUI update with delay to prevent focus stealing
-        self.root.after(100, update_gui)
+        """Display packet in GUI - routes to active session display"""
+        # Get the active session to display packets
+        active_session = self.get_current_session()
+        if active_session and active_session['packet_text']:
+            # Use the session-based packet display method
+            self.display_session_packet(active_session['id'], packet_info)
+        else:
+            # Fallback to console if no active session
+            self.log_to_console(f"📦 {packet_info}")
         
+    def toggle_monitoring(self):
+        """Toggle main monitoring on/off - controls the original single-session monitoring"""
+        if not hasattr(self, 'monitoring'):
+            self.monitoring = False
+            
+        if not self.monitoring:
+            # Start monitoring
+            self.monitoring = True
+            self.start_button.config(text="🛑 Stop Monitoring", state=tk.NORMAL)
+            self.log_to_console("🚀 Starting main monitoring session")
+            
+            # Clear the main packet display for fresh start
+            if hasattr(self, 'packet_text') and self.packet_text:
+                self.packet_text.delete(1.0, tk.END)
+            
+            # Start monitoring thread
+            if MODULES_AVAILABLE:
+                self.log_to_console("🔥 Starting real packet capture")
+                monitor_thread = threading.Thread(target=self.monitoring_loop, daemon=True)
+                monitor_thread.start()
+            else:
+                self.log_to_console("🎮 Starting demo monitoring")
+                demo_thread = threading.Thread(target=self.demo_monitoring_loop, daemon=True)
+                demo_thread.start()
+        else:
+            # Stop monitoring
+            self.monitoring = False
+            self.start_button.config(text="🚀 Start Monitoring", state=tk.NORMAL)
+            self.log_to_console("🛑 Stopped main monitoring session")
+    
     def apply_filters(self):
         """Apply current filters"""
         self.log_to_console("📝 Applying filters...")
@@ -2417,18 +2453,31 @@ class NetworkMonitorGUI:
         return filters
         
     def clear_data(self):
-        """Clear all displayed data"""
-        self.packet_text.delete(1.0, tk.END)
-        self.stats_text.delete(1.0, tk.END)
-        
-        # Clear trees
-        for item in self.devices_tree.get_children():
-            self.devices_tree.delete(item)
-        for item in self.apps_tree.get_children():
-            self.apps_tree.delete(item)
+        """Clear all displayed data from active session"""
+        active_session = self.get_current_session()
+        if active_session:
+            # Clear packet display
+            if active_session['packet_text']:
+                active_session['packet_text'].delete(1.0, tk.END)
+            
+            # Clear stats display  
+            if active_session['stats_text']:
+                active_session['stats_text'].delete(1.0, tk.END)
+            
+            # Clear trees
+            if active_session['devices_tree']:
+                for item in active_session['devices_tree'].get_children():
+                    active_session['devices_tree'].delete(item)
+                    
+            if active_session['apps_tree']:
+                for item in active_session['apps_tree'].get_children():
+                    active_session['apps_tree'].delete(item)
+            
+            # Reset packet counter for this session
+            active_session['packets_captured'] = 0
             
         self.packets_captured = 0
-        self.log_to_console("🗑️ All data cleared")
+        self.log_to_console("🗑️ Active session data cleared")
         
 
         
