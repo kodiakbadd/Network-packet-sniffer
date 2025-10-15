@@ -1821,8 +1821,13 @@ class NetworkMonitorGUI:
                         port_info = f"{src_port}:{dst_port}" if src_port and dst_port else ""
                         display_text = f"📦 {src_ip}:{port_info} -> {dst_ip} [{protocol}] {app_name} (MAC: {packet_data.get('src_mac', 'Unknown')})"
                         
-                        # Display packet in session
-                        self.display_session_packet(session_id, display_text)
+                        # Display packet in session with error handling
+                        print(f"🔍 DEBUG: Processing packet: {display_text[:50]}...")
+                        try:
+                            self.display_session_packet(session_id, display_text)
+                            print(f"✅ DEBUG: Packet display called successfully")
+                        except Exception as display_error:
+                            print(f"❌ DEBUG: Display packet failed: {display_error}")
                         
                         # Update session statistics
                         session['packets_captured'] += 1
@@ -1876,7 +1881,10 @@ class NetworkMonitorGUI:
     
     def display_session_packet(self, session_id, packet_info):
         """Display packet in session-specific display"""
-        session = self.monitor_sessions[session_id]
+        session = self.monitor_sessions.get(session_id)
+        if not session:
+            print(f"❌ DEBUG: No session found for ID: {session_id}")
+            return
         
         def update_display():
             timestamp = datetime.now().strftime('%H:%M:%S')
@@ -1884,11 +1892,15 @@ class NetworkMonitorGUI:
             clean_packet_info = packet_info.replace('📦', '[PKT]').replace('🔥', '[HOT]').replace('⚠️', '[WARN]')
             packet_line = f"[{timestamp}] {clean_packet_info}\n"
             
+            print(f"🔍 DEBUG: Attempting to display packet: {packet_line.strip()}")  # Debug output
+            
             # Update main session display
             if session['packet_text']:
                 try:
+                    print(f"📦 DEBUG: Inserting into widget: {type(session['packet_text'])}")
                     session['packet_text'].insert(tk.END, packet_line)
                     session['packet_text'].see(tk.END)
+                    print(f"✅ DEBUG: Packet inserted successfully")
                     
                     # Keep only last 200 lines for better history
                     content = session['packet_text'].get(1.0, tk.END)
@@ -1896,8 +1908,10 @@ class NetworkMonitorGUI:
                     if len(lines) > 200:
                         # Remove oldest lines
                         session['packet_text'].delete(1.0, f"{len(lines)-200}.0")
-                except tk.TclError:
-                    pass  # Widget might be destroyed
+                except Exception as e:
+                    print(f"❌ DEBUG: Widget operation failed: {e}")
+            else:
+                print(f"❌ DEBUG: No packet_text widget found for session {session_id}")
             
             # Update split screen displays if they exist
             if self.split_view_active:
@@ -1919,8 +1933,21 @@ class NetworkMonitorGUI:
                             if split_widget_key in session:
                                 del session[split_widget_key]
         
-        # Schedule update immediately for better responsiveness
-        self.root.after(0, update_display)
+        # Schedule update immediately for better responsiveness with error handling
+        try:
+            if hasattr(self, 'root') and self.root:
+                self.root.after(0, update_display)
+            else:
+                print("❌ DEBUG: No root window available")
+                # Fallback: try direct update
+                update_display()
+        except Exception as e:
+            print(f"❌ DEBUG: GUI update scheduling failed: {e}")
+            # Last resort: direct call
+            try:
+                update_display()
+            except Exception as e2:
+                print(f"❌ DEBUG: Direct GUI update failed: {e2}")
     
     def update_session_displays(self, session_id):
         """Update displays for a specific session"""
@@ -2502,6 +2529,57 @@ class NetworkMonitorGUI:
         # Schedule console update with delay
         self.root.after(50, update_console)
     
+    def scan_network_devices(self):
+        """Scan local network for other devices"""
+        import subprocess
+        import ipaddress
+        
+        devices_found = []
+        try:
+            # Get current IP to determine network range
+            result = subprocess.run(['ipconfig'], capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            lines = result.stdout.split('\n')
+            
+            current_ip = None
+            for line in lines:
+                if 'IPv4 Address' in line and '10.0.0.' in line:
+                    current_ip = line.split(':')[-1].strip()
+                    break
+            
+            if current_ip:
+                # Scan common devices on 10.0.0.x network
+                network = ipaddress.IPv4Network(f"{current_ip}/24", strict=False)
+                common_ips = ['10.0.0.1', '10.0.0.151', '10.0.0.198', '10.0.0.212']  # Router, Phone, Current, RPI
+                
+                for ip in common_ips:
+                    if ipaddress.IPv4Address(ip) in network:
+                        # Try to ping each device
+                        ping_result = subprocess.run(['ping', '-n', '1', '-w', '1000', ip], 
+                                                   capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                        if ping_result.returncode == 0:
+                            device_type = "Unknown"
+                            if ip == "10.0.0.1":
+                                device_type = "Router"
+                            elif ip == "10.0.0.151":
+                                device_type = "Phone"
+                            elif ip == "10.0.0.198":
+                                device_type = "Computer"
+                            elif ip == "10.0.0.212":
+                                device_type = "Raspberry Pi"
+                            
+                            devices_found.append({
+                                "mac": "Unknown", 
+                                "ip": ip, 
+                                "hostname": f"Device-{ip.split('.')[-1]}", 
+                                "vendor": "Unknown", 
+                                "type": device_type, 
+                                "packets": 0 if ip != current_ip else 25
+                            })
+        except Exception as e:
+            print(f"Network scan error: {e}")
+            
+        return devices_found
+
     def generate_demo_data(self):
         """Generate demo data based on current filters"""
         # Get current filter values
@@ -2509,12 +2587,28 @@ class NetworkMonitorGUI:
         target_ip = self.filter_ip.get().strip() or "10.14.0.2"
         target_port = self.filter_port.get().strip()
         
-        # Generate devices data
-        self.devices_found = [
-            {"mac": target_mac, "ip": target_ip, "hostname": "Target-Device", "vendor": "Unknown", "type": "Computer", "packets": self.packets_captured + 45},
-            {"mac": "aa:bb:cc:dd:ee:ff", "ip": "10.0.0.1", "hostname": "Router", "vendor": "TP-Link", "type": "Gateway", "packets": 12},
-            {"mac": "11:22:33:44:55:66", "ip": "10.0.0.100", "hostname": "Phone", "vendor": "Samsung", "type": "Mobile", "packets": 8}
-        ]
+        # Generate devices data - use real network scan if available
+        try:
+            scanned_devices = self.scan_network_devices()
+            if scanned_devices:
+                self.devices_found = scanned_devices
+            else:
+                # Fallback to demo data
+                self.devices_found = [
+                    {"mac": target_mac, "ip": target_ip, "hostname": "Target-Device", "vendor": "Unknown", "type": "Computer", "packets": self.packets_captured + 45},
+                    {"mac": "aa:bb:cc:dd:ee:ff", "ip": "10.0.0.1", "hostname": "Router", "vendor": "TP-Link", "type": "Gateway", "packets": 12},
+                    {"mac": "11:22:33:44:55:66", "ip": "10.0.0.151", "hostname": "Phone", "vendor": "Samsung", "type": "Mobile", "packets": 0},
+                    {"mac": "cc:dd:ee:ff:11:22", "ip": "10.0.0.212", "hostname": "RaspberryPi", "vendor": "Raspberry Pi Foundation", "type": "IoT Device", "packets": 0}
+                ]
+        except Exception as e:
+            print(f"Device scan failed: {e}")
+            # Fallback to demo data
+            self.devices_found = [
+                {"mac": target_mac, "ip": target_ip, "hostname": "Target-Device", "vendor": "Unknown", "type": "Computer", "packets": self.packets_captured + 45},
+                {"mac": "aa:bb:cc:dd:ee:ff", "ip": "10.0.0.1", "hostname": "Router", "vendor": "TP-Link", "type": "Gateway", "packets": 12},
+                {"mac": "11:22:33:44:55:66", "ip": "10.0.0.151", "hostname": "Phone", "vendor": "Samsung", "type": "Mobile", "packets": 0},
+                {"mac": "cc:dd:ee:ff:11:22", "ip": "10.0.0.212", "hostname": "RaspberryPi", "vendor": "Raspberry Pi Foundation", "type": "IoT Device", "packets": 0}
+            ]
         
         # Generate applications data based on port filter
         if target_port:
