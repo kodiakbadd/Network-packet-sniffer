@@ -5,7 +5,7 @@ a = Analysis(
     ['network_gui.py'],
     pathex=[],
     binaries=[],
-    datas=[('favicon.ico', '.')],
+    datas=[('favicon.ico', '.'), ('saved_configs.json', '.'), ('src', 'src')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
